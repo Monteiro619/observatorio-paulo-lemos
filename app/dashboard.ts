@@ -6,10 +6,35 @@ type JsonRecord = Record<string, unknown>;
 type ApiList = { dados?: JsonRecord[]; links?: { rel?: string; href?: string }[] };
 type ApiDetail = { dados?: JsonRecord };
 
+function readXmlFields(element: Element): JsonRecord {
+  return Object.fromEntries(Array.from(element.children, child => {
+    if (child.tagName === "orgaos") {
+      return [child.tagName, Array.from(child.children, readXmlFields)];
+    }
+    return [child.tagName, child.childElementCount ? readXmlFields(child) : child.textContent];
+  }));
+}
+
 async function get(path: string) {
-  const response = await fetch(path.startsWith("http") ? path : `${BASE}${path}`, { headers: { accept: "application/json" }, signal: AbortSignal.timeout(15000) });
-  if (!response.ok) throw new Error(`Câmara API ${response.status}`);
-  return response.json();
+  const url = new URL(path.startsWith("http") ? path : `${BASE}${path}`);
+  const response = await fetch(url, {
+    headers: { accept: "application/json" },
+    signal: AbortSignal.timeout(15000),
+  });
+  if (!response.ok) throw new Error(`Câmara API ${response.status} (${url.pathname})`);
+  const body = await response.text();
+  if (!body.trimStart().startsWith("<")) return JSON.parse(body);
+
+  const xml = new DOMParser().parseFromString(body, "application/xml");
+  const data = xml.documentElement.querySelector(":scope > dados");
+  if (!data || xml.querySelector("parsererror")) {
+    throw new Error(`Resposta XML inválida (${url.pathname})`);
+  }
+  const isDetail = /\/(eventos|proposicoes)\/\d+$/.test(url.pathname);
+  return {
+    dados: isDetail ? readXmlFields(data) : Array.from(data.children, readXmlFields),
+    links: Array.from(xml.querySelectorAll("links > link"), readXmlFields),
+  };
 }
 
 async function getExpenses(year: number) {
@@ -180,7 +205,8 @@ export async function GET(request: Request) {
     };
 
     return Response.json({ proposals, committees, events, spending, yearCounts, selectedYear, weekStart, updatedAt:new Date().toISOString(), source:"live" });
-  } catch {
+  } catch (error) {
+    console.warn("Falha ao consultar os Dados Abertos da Câmara", error);
     return Response.json({ error:"Dados oficiais temporariamente indisponíveis", updatedAt:new Date().toISOString() }, { status:503 });
   }
 }
