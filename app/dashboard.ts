@@ -48,6 +48,31 @@ async function getExpenses(year: number) {
   return rows;
 }
 
+async function getProposals(year: number) {
+  // The Câmara API limits the date span of each propositions query to three months.
+  const quarters = await Promise.all(Array.from({ length: 4 }, async (_, index) => {
+    const firstMonth = index * 3;
+    const start = new Date(Date.UTC(year, firstMonth, 1)).toISOString().slice(0, 10);
+    const end = new Date(Date.UTC(year, firstMonth + 3, 0)).toISOString().slice(0, 10);
+    const params = new URLSearchParams({
+      idDeputadoAutor: String(DEPUTY_ID),
+      dataInicio: start,
+      dataFim: end,
+      itens: "100",
+    });
+    const rows: JsonRecord[] = [];
+    let next: string | undefined = `/proposicoes?${params}`;
+    while (next) {
+      const result: ApiList = await get(next);
+      rows.push(...(result.dados || []));
+      next = result.links?.find(link => link.rel === "next")?.href;
+    }
+    return rows;
+  }));
+  const unique = new Map(quarters.flat().map(row => [Number(row.id), row]));
+  return [...unique.values()].sort((a, b) => Number(b.id) - Number(a.id));
+}
+
 function shortDate(value?: string) {
   if (!value) return "recentemente";
   const date = new Date(value);
@@ -94,15 +119,15 @@ export async function GET(request: Request) {
     const end = new Date(start); end.setUTCDate(end.getUTCDate() + 6);
     const dataInicio = start.toISOString().slice(0,10);
     const dataFim = end.toISOString().slice(0,10);
-    const propQs = new URLSearchParams({ idDeputadoAutor: String(DEPUTY_ID), dataInicio: `${selectedYear}-01-01`, dataFim: `${selectedYear}-12-31`, ordem: "DESC", ordenarPor: "id", itens: "100" });
     const years = Array.from({ length: currentYear - 2023 + 1 }, (_, i) => currentYear - i);
 
-    const [propList, organList, yearlyLists, expenseRows] = await Promise.all([
-      get(`/proposicoes?${propQs}`), get(`/deputados/${DEPUTY_ID}/orgaos`),
-      Promise.all(years.map(year => get(`/proposicoes?${new URLSearchParams({ idDeputadoAutor:String(DEPUTY_ID), dataInicio:`${year}-01-01`, dataFim:`${year}-12-31`, itens:"100" })}`).catch(() => ({ dados: [] })))),
+    const [yearlyLists, organList, expenseRows] = await Promise.all([
+      Promise.all(years.map(getProposals)),
+      get(`/deputados/${DEPUTY_ID}/orgaos`),
       getExpenses(expenseYear),
     ]);
-    const yearCounts = years.map((year, i) => ({ year, count: ((yearlyLists[i] as ApiList).dados || []).length }));
+    const propList = yearlyLists[years.indexOf(selectedYear)] || [];
+    const yearCounts = years.map((year, index) => ({ year, count: yearlyLists[index].length }));
     const activeOrgans = (((organList as ApiList).dados || []).filter(o => !o.dataFim));
     const eventQueries = [String(DEPUTY_ID), `orgao:${PLENARY_ORGAN_ID}`, ...activeOrgans.map(o => `orgao:${String(o.idOrgao || o.id)}`)];
     const eventResponses = await Promise.all(eventQueries.map(key => {
@@ -153,7 +178,7 @@ export async function GET(request: Request) {
       };
     });
 
-    const rawProps = ((propList as ApiList).dados || []).slice(0,24);
+    const rawProps = propList.slice(0,24);
     const [details, progressResponses] = await Promise.all([
       Promise.all(rawProps.map(p => get(`/proposicoes/${String(p.id)}`).catch(() => ({ dados: {} })) as Promise<ApiDetail>)),
       Promise.all(rawProps.map(p => get(`/proposicoes/${String(p.id)}/tramitacoes?ordem=ASC&ordenarPor=dataHora`).catch(() => ({ dados: [] })) as Promise<ApiList>)),
